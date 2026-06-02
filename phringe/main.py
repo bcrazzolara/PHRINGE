@@ -3,7 +3,6 @@ from typing import Union, overload, Tuple
 
 import numpy as np
 import torch
-from astropy.constants.codata2018 import G
 from sympy import lambdify, symbols
 from torch import Tensor
 
@@ -12,6 +11,7 @@ from phringe.core.configuration import Configuration
 from phringe.core.instrument import Instrument
 from phringe.core.observation import Observation
 from phringe.core.scene import Scene
+from phringe.core.sources.planet import Planet
 from phringe.io.nifits_writer import NIFITSWriter
 from phringe.util.grid import get_meshgrid
 from phringe.util.memory import get_device, iter_time_slices
@@ -426,10 +426,6 @@ class PHRINGE:
             times = times[None, :, None, None]
 
         else:
-            import astropy.units as u
-            from poliastro.bodies import Body
-            from poliastro.twobody import Orbit
-
             semi_major_axis = kwargs['semi_major_axis']
             eccentricity = kwargs['eccentricity']
             inclination = kwargs['inclination']
@@ -440,37 +436,30 @@ class PHRINGE:
             host_star_mass = kwargs['host_star_mass']
             planet_mass = kwargs['planet_mass']
 
-            star = Body(parent=None, k=G * (host_star_mass + planet_mass) * u.kg, name='Star')
-            orbit = Orbit.from_classical(
-                star,
-                a=semi_major_axis * u.m,
-                ecc=u.Quantity(eccentricity),
-                inc=inclination * u.rad,
-                raan=raan * u.rad,
-                argp=argument_of_periapsis * u.rad,
-                nu=true_anomaly * u.rad
+            x, y = Planet._propagate_kepler_orbit(
+                torch.tensor(times, device=self._device),
+                semi_major_axis,
+                eccentricity,
+                inclination,
+                raan,
+                argument_of_periapsis,
+                true_anomaly,
+                planet_mass,
+                host_star_mass,
+                self._device
             )
 
-            x_positions = np.zeros(len(times))[None, :, None, None]
-            y_positions = np.zeros(len(times))[None, :, None, None]
-
-            for it, time in enumerate(times):
-                orbit_propagated = orbit.propagate(time * u.s)
-                x, y = (orbit_propagated.r[0].to(u.m).value, orbit_propagated.r[1].to(u.m).value)
-                x_positions[:, it] = x / host_star_distance
-                y_positions[:, it] = y / host_star_distance
-
+            x_positions = x.cpu().numpy() / host_star_distance
+            y_positions = y.cpu().numpy() / host_star_distance
             times = times[None, None, :, None, None]
 
         # Check if position is outside of field of view. If so, set factor to 0 to cancel the response
         fovs = self.get_field_of_view().cpu().numpy()
         factors = np.ones_like(fovs)
-        x_pos = x_positions.item()
-        y_pos = y_positions.item()
+        x_pos_max = abs(x_positions).max()
+        y_pos_max = abs(y_positions).max()
         for i, fov in enumerate(fovs):
-            # if x_pos > fov / 2 or y_pos > fov / 2:
-            #     factors[i] = 0
-            if abs(x_pos) > fov / 2 or abs(y_pos) > fov / 2:
+            if x_pos_max > fov / 2 or y_pos_max > fov / 2:
                 factors[i] = 0
 
         # Return the corresponding counts depending on kernel usage
