@@ -267,32 +267,18 @@ class Planet(BaseSource):
         return spectral_energy_distribution[:, None, None]
 
     @staticmethod
-    def _solve_kepler(M: Tensor, e: Tensor, n_iter: int = 8) -> Tensor:
-        E = M.clone()
-
-        for _ in range(n_iter):
-            E = E - (E - e * torch.sin(E) - M) / (1 - e * torch.cos(E))
-
-        return E
-
-    def _get_proj_sky_pos(self) -> Tensor:
-        """Return the projected x- and y-position of the planet on the sky as a tensor of shape 2 x 1 or 2 x n_time_steps.
-
-        Returns
-        -------
-        torch.Tensor
-            Tensor containing the projected x- and y-position of the planets on the sky.
-        """
-        times = self._phringe.simulation_time_steps.to(device=self._phringe._device)
-
-        if not self.propagate_orbit:
-            times = torch.zeros_like(times)
-
-        y, x = self._propagate_kepler_orbit(times)
-
-        return torch.stack([x, y], dim=0)
-
-    def _propagate_kepler_orbit(self, times: Tensor) -> Tuple[Tensor, Tensor]:
+    def _propagate_kepler_orbit(
+            times: Tensor,
+            semi_major_axis: float,
+            eccentricity: float,
+            inclination: float,
+            raan: float,
+            argument_of_periapsis: float,
+            true_anomaly: float,
+            planet_mass: float,
+            host_star_mass: float,
+            device: torch.device,
+    ) -> Tuple[Tensor, Tensor]:
         """Propagate the planet's orbit to the given times.
 
         Parameters
@@ -304,24 +290,17 @@ class Planet(BaseSource):
         -------
 
         """
-        device = self._phringe._device
         dtype = torch.float32
 
-        host_star_mass = (
-            self._phringe._scene.star.mass
-            if self._phringe._scene.star is not None
-            else self._phringe._observation.host_star_mass
-        )
-
-        a = torch.tensor(self.semi_major_axis, dtype=dtype, device=device)
-        e = torch.tensor(self.eccentricity, dtype=dtype, device=device)
-        inc = torch.tensor(self.inclination, dtype=dtype, device=device)
-        raan = torch.tensor(self.raan, dtype=dtype, device=device)
-        argp = torch.tensor(self.argument_of_periapsis, dtype=dtype, device=device)
-        f0 = torch.tensor(self.true_anomaly, dtype=dtype, device=device)
+        a = torch.tensor(semi_major_axis, dtype=dtype, device=device)
+        e = torch.tensor(eccentricity, dtype=dtype, device=device)
+        inc = torch.tensor(inclination, dtype=dtype, device=device)
+        raan = torch.tensor(raan, dtype=dtype, device=device)
+        argp = torch.tensor(argument_of_periapsis, dtype=dtype, device=device)
+        f0 = torch.tensor(true_anomaly, dtype=dtype, device=device)
 
         mu = torch.tensor(
-            6.67430e-11 * (host_star_mass + self.mass),
+            6.67430e-11 * (host_star_mass + planet_mass),
             dtype=dtype,
             device=device,
         )
@@ -340,7 +319,7 @@ class Planet(BaseSource):
         M = M0 + n * times
         M = torch.remainder(M, 2 * math.pi)
 
-        E = self._solve_kepler(M, e)
+        E = Planet._solve_kepler(M, e)
 
         # Position in orbital plane
         x_orb = a * (torch.cos(E) - e)
@@ -365,3 +344,46 @@ class Planet(BaseSource):
         )
 
         return x, y
+
+    @staticmethod
+    def _solve_kepler(M: Tensor, e: Tensor, n_iter: int = 8) -> Tensor:
+        E = M.clone()
+
+        for _ in range(n_iter):
+            E = E - (E - e * torch.sin(E) - M) / (1 - e * torch.cos(E))
+
+        return E
+
+    def _get_proj_sky_pos(self) -> Tensor:
+        """Return the projected x- and y-position of the planet on the sky as a tensor of shape 2 x 1 or 2 x n_time_steps.
+
+        Returns
+        -------
+        torch.Tensor
+            Tensor containing the projected x- and y-position of the planets on the sky.
+        """
+        times = self._phringe.simulation_time_steps.to(device=self._phringe._device)
+
+        if not self.propagate_orbit:
+            times = torch.zeros_like(times)
+
+        host_star_mass = (
+            self._phringe._scene.star.mass
+            if self._phringe._scene.star is not None
+            else self._phringe._observation.host_star_mass
+        )
+
+        y, x = self._propagate_kepler_orbit(
+            times,
+            self.semi_major_axis,
+            self.eccentricity,
+            self.inclination,
+            self.raan,
+            self.argument_of_periapsis,
+            self.true_anomaly,
+            self.mass,
+            host_star_mass,
+            self._phringe._device
+        )
+
+        return torch.stack([x, y], dim=0)
