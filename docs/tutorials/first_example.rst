@@ -22,5 +22,5 @@ We use the config file to specify the observation, instrument, and astrophysical
 Python Script
 ~~~~~~~~~~~~~
 
-.. include:: ../_static/first_example.ipynb
+.. include:: first_example.ipynb
    :parser: myst_nb.docutils_
