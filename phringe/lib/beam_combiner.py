@@ -7,6 +7,13 @@ class BaseBeamCombiner:
     sep_at_max_mod_eff = None
 
 
+class SingleBracewell(BaseBeamCombiner):
+    catm = 1 / 2 * Matrix([[1, 1],
+                           [1, -1]])
+    kernels = Matrix([[0, 1]])
+    sep_at_max_mod_eff = [0.606]
+
+
 class DoubleBracewell(BaseBeamCombiner):
     catm = 1 / 2 * Matrix([[0, 0, sqrt(2), sqrt(2)],
                            [sqrt(2), sqrt(2), 0, 0],

@@ -7,6 +7,14 @@ class BaseArrayConfiguration:
     acm = None
 
 
+class SBWConfiguration(BaseArrayConfiguration):
+    acm = (b / 2
+           * Matrix([[cos(2 * pi / tm * t), -sin(2 * pi / tm * t)],
+                     [sin(2 * pi / tm * t), cos(2 * pi / tm * t)]])
+           * Matrix([[0, 0],
+                     [1, -1]]))
+
+
 class XArrayConfiguration(BaseArrayConfiguration):
     q = 6
     acm = (b / 2
