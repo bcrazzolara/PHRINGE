@@ -503,9 +503,9 @@ class PHRINGE:
             raise ValueError('Null depth can only be calculated for a scene with a star.')
 
         star_sky_brightness = self._scene.star.sky_brightness_distribution
-        star_sky_coordiantes = self._scene.star.sky_coordinates
+        star_sky_coordinates = self._scene.star.sky_coordinates
 
-        x_max = star_sky_coordiantes[0].max()
+        x_max = star_sky_coordinates[0].max()
         diff_ir_emp = self.get_instrument_response(fov=2 * abs(x_max), kernels=True, perturbations=True)
         imax = torch.sum(star_sky_brightness, dim=(1, 2))
         imin = torch.sum(diff_ir_emp @ star_sky_brightness[None, :, None, :, :], dim=(3, 4))
