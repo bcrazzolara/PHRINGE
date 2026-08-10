@@ -92,7 +92,7 @@ class Exozodi(BaseSource):
 
         sky_coordinates = get_meshgrid(fov_au, self._phringe._grid_size, self._phringe._device, ) # [au]
 
-        # compute the coordinates in the disk system (corrected for inclination)
+        # compute the coordinates in the disk system (corrected for inclination and tilting)
         sky_coordinates_inc = torch.zeros_like(sky_coordinates)
         sky_coordinates_inc[0] = torch.cos(raan) * sky_coordinates[0] + torch.sin(raan) * sky_coordinates[1]
         sky_coordinates_inc[1] = -torch.sin(raan)/torch.cos(inc) * sky_coordinates[0] + torch.cos(raan)/torch.cos(inc) * sky_coordinates[1]
@@ -116,7 +116,7 @@ class Exozodi(BaseSource):
         ref_radius_au = torch.sqrt(torch.tensor(host_star_luminosity / 3.86e26, device=device, dtype=torch.float32))
         surface_maps = self.level * 7.12e-8 * (self._radial_fov_au / ref_radius_au) ** (-0.34)
 
-        # Correction for a tilted exozodi to ensure the same total flux
+        # Correction for an inclined exozodi to ensure the same total flux
         inc = torch.tensor(self.inclination, dtype=torch.float32, device=device)
         surface_maps /=  torch.cos(inc)
 
