@@ -15,6 +15,7 @@ from phringe.core.sources.planet import Planet
 from phringe.io.nifits_writer import NIFITSWriter
 from phringe.util.grid import get_meshgrid
 from phringe.util.memory import get_device, iter_time_slices
+from phringe.util.spectrum import get_blackbody_spectrum_si_units
 
 
 class PHRINGE:
@@ -187,7 +188,140 @@ class PHRINGE:
                     current_counts = torch.poisson(current_counts.cpu()).to(self._device)
                 counts[:, :, it_low:it_high] += current_counts
 
+        # Add thermal noise 
+        thermal_counts = self._get_thermal_counts()
+        if self._device != torch.device('mps'):
+            thermal_counts = torch.poisson(thermal_counts)
+        else:
+            thermal_counts = torch.poisson(thermal_counts.cpu()).to(self._device)
+        counts += thermal_counts
+
         return counts
+
+    def _get_thermal_counts(self) -> Tensor:
+        """Return the thermal background and dark current counts (mirror/OTA + pre-fiber
+        environment + detector thermal emission + dark current) 
+
+        Unlike star/planet/local zodi/exozodi, none of this is sky light and should not be 
+        filtered by the instrument's spatially-varying response, so it's computed once here rather 
+        than as a BaseSource run through get_response(). Currently, every output receives the identical 
+        mirror/instrument leak: thermal emission from independent, incoherent apertures combined 
+        through a lossless (unitary) combiner matrix always contributes exactly "one aperture's 
+        worth" to every output, regardless of the number of apertures.
+
+        Currently constant in time but returns the full time-resolved shape. Returns all zeros if none 
+        of mirror_temperature/instrument_temperature/detector_temperature/dark_current are set on 
+        the instrument (the default), so existing configs are unaffected.
+
+        Returns
+        -------
+        torch.Tensor
+            The thermal background counts of shape n_outputs x n_wavelengths x n_simulation_time_steps.
+        """
+        instrument = self._instrument
+        n_out = instrument.number_of_outputs
+        n_time_steps = len(self.simulation_time_steps)
+        wavelengths = instrument.wavelength_bin_centers
+        wavelength_widths = instrument.wavelength_bin_widths
+
+        # Single-mode étendue (A * Omega = lambda^2), same for the mirror andn pre-fiber environment terms.
+        etendue = wavelengths ** 2
+
+        # Named electron_rate throughout even though it's a photon rate until the quantum
+        # efficiency multiplication below -- kept as one accumulator (rather than a separate
+        # photon_rate) so it lines up with dark_current, which is natively an electron rate.
+        electron_rate = torch.zeros_like(wavelengths)
+
+        # Thermal noise of the mirror
+        if instrument.mirror_temperature is not None:
+            if instrument.mirror_emissivity is None or instrument.mirror_throughput is None:
+                raise ValueError(
+                    "mirror_temperature is set, but mirror_emissivity and/or mirror_throughput "
+                    "are missing -- both are required to compute the mirror thermal contribution."
+                )
+            sub_throughput = instrument.throughput / instrument.mirror_throughput
+            electron_rate = electron_rate + (
+                    instrument.mirror_emissivity
+                    * sub_throughput
+                    * get_blackbody_spectrum_si_units(instrument.mirror_temperature, wavelengths) # Nph / (m^2 s sr m)
+                    * wavelength_widths
+                    * etendue
+            )
+
+        # Thermal noise of the instrument (pre-fiber environment)
+        if instrument.instrument_temperature is not None:
+            if instrument.mirror_throughput is None or instrument.instrument_emissivity is None:
+                raise ValueError(
+                    "instrument_temperature is set, but mirror_throughput and/or "
+                    "instrument_emissivity are missing -- both are required to compute the "
+                    "pre-fiber environment's contribution."
+                )
+            sub_throughput = (1 + instrument.throughput / instrument.mirror_throughput) / 2
+            electron_rate = electron_rate + (
+                    instrument.instrument_emissivity
+                    * sub_throughput
+                    * get_blackbody_spectrum_si_units(instrument.instrument_temperature, wavelengths) # Nph / (m^2 s sr m)
+                    * wavelength_widths
+                    * etendue
+            )
+
+        # Thermal noise of the detector
+        if instrument.detector_temperature is not None:
+            if (instrument.detector_wavelength_min is None or instrument.detector_wavelength_max is None
+                    or instrument.pixel_size is None or instrument.pixels_per_wavelength_bin is None):
+                raise ValueError(
+                    "detector_temperature is set, but detector_wavelength_min/detector_wavelength_max/"
+                    "pixel_size/pixels_per_wavelength_bin are missing -- all are required to compute "
+                    "the detector thermal contribution."
+                )
+            # Detector background isn't separated into the wavelength channels since it is generated after the spectrography
+            # Itegrate over the detector's full sensitivity range once and apply the same flat contribution to every wavelength bin.
+            delta_wl = 1e-7
+            detector_wavelengths = torch.arange(
+                instrument.detector_wavelength_min,
+                instrument.detector_wavelength_max,
+                delta_wl,
+                device=self._device
+            )
+            detector_area = instrument.pixel_size ** 2 * instrument.pixels_per_wavelength_bin
+            detector_bb = get_blackbody_spectrum_si_units(instrument.detector_temperature, detector_wavelengths) # Nph / (m^2 s sr m)
+            detector_flux = torch.pi * detector_area * torch.trapezoid(detector_bb, detector_wavelengths) # Nph / s
+            electron_rate = electron_rate + detector_flux
+
+        # Photon rate -> electron rate: from here on electron_rate is genuinely electrons/s,
+        electron_rate = electron_rate * instrument.quantum_efficiency
+
+        # Dark current: purely electronic (already in e-/s, generated internal to the pixel),
+        # unlike the terms above, it must NOT be multiplied by quantum efficiency or throughput. 
+        # Same flat value applied to every wavelength bin (pixels_per_wavelength_bin), for the same reason
+        # as the detector thermal term
+        if instrument.dark_current is not None:
+            if instrument.pixels_per_wavelength_bin is None:
+                raise ValueError(
+                    "dark_current is set, but pixels_per_wavelength_bin is missing -- it's "
+                    "required to compute the number of pixels."
+                )
+            # Resolution correction: if the simulator uses a lower spectral resolving power than
+            # the real instrument (spectral_resolving_power_instrument), each simulator bin spans
+            # the wavelength range that several real (narrower) bins would have covered. Scaling by
+            # n_bins_instrument / n_bins_simulator (preserves the true total dark current across the 
+            # whole band). If spectral_resolving_power_instrument isn't set, no correction is 
+            # applied (simulator resolving power is assumed to already be the real one).
+            resolution_correction = 1.0
+            if instrument.spectral_resolving_power_instrument is not None:
+                n_bins_instrument = instrument._count_wavelength_bins(instrument.spectral_resolving_power_instrument)
+                n_bins_simulator = len(wavelengths)
+                resolution_correction = n_bins_instrument / n_bins_simulator
+            electron_rate = electron_rate + (
+                    instrument.dark_current * instrument.pixels_per_wavelength_bin * resolution_correction
+            )
+
+        # Same per-wavelength value for every output (see docstring)
+        thermal_counts = (
+                electron_rate[None, :, None].expand(n_out, -1, n_time_steps)
+                * self._simulation_time_step_size
+        )
+        return thermal_counts
 
     def _prepare_perturbations(self, it_low: int, it_high: int) -> Tuple[
         Union[Tensor, None], Union[Tensor, None], Union[Tensor, None]]:

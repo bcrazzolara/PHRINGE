@@ -114,7 +114,7 @@ class Exozodi(BaseSource):
             host_star_luminosity = 4 * np.pi * self._phringe._observation.host_star_radius ** 2 * sigma * self._phringe._observation.host_star_temperature ** 4
 
         ref_radius_au = torch.sqrt(torch.tensor(host_star_luminosity / 3.86e26, device=device, dtype=torch.float32))
-        surface_maps = self.level * 7.12e-8 * (self._radial_fov_au / ref_radius_au) ** (-0.34)
+        surface_maps = self.level * 7.12e-8 * (self._radial_fov_au / ref_radius_au + 1e-6) ** (-0.34)
 
         # Correction for an inclined exozodi to ensure the same total flux
         inc = torch.tensor(self.inclination, dtype=torch.float32, device=device)

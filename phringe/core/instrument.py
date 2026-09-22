@@ -75,6 +75,32 @@ class Instrument(BaseEntity):
     _torch_func_dict: dict = None
     _fov_taper: Any = None
 
+    # Thermal background noise (see docs/thermal_noise.md-equivalent discussion): all optional
+    # and default to None, so existing configs are unaffected unless these are explicitly set.
+    # mirror_temperature/mirror_emissivity/mirror_throughput describe the primary mirror (OTA);
+    # instrument_temperature/instrument_emissivity describe the pre-fiber environment (the
+    # reference LIFEsim model defaults instrument_emissivity to 1, i.e. a perfect emitter, but
+    # it's a genuinely configurable parameter there, not a hardcoded constant -- so it's kept
+    # configurable here too); detector_temperature/detector_wavelength_min/max/pixel_size/
+    # pixels_per_wavelength_bin describe the detector's own thermal background.
+    mirror_temperature: Union[str, float, Quantity] = None
+    mirror_emissivity: float = None
+    mirror_throughput: float = None
+    instrument_temperature: Union[str, float, Quantity] = None
+    instrument_emissivity: float = None
+    detector_temperature: Union[str, float, Quantity] = None
+    detector_wavelength_min: Union[str, float, Quantity] = None
+    detector_wavelength_max: Union[str, float, Quantity] = None
+    pixel_size: Union[str, float, Quantity] = None
+    pixels_per_wavelength_bin: float = None
+    dark_current: float = None
+    # The real instrument's spectral resolving power (e.g. 100), independent of whatever
+    # (possibly lower, for simulation speed) spectral_resolving_power this run actually uses --
+    # used only to correct the dark current term for the resulting pixel-count mismatch. If
+    # None, no correction is applied (the simulator's own resolving power is assumed to already
+    # match the real instrument's).
+    spectral_resolving_power_instrument: float = None
+
     def __init__(self, **data: object) -> None:
         super().__init__(**data)
         self.number_of_inputs = self.complex_amplitude_transfer_matrix.shape[1]
@@ -227,6 +253,46 @@ class Instrument(BaseEntity):
         float
             The maximum wavelength in units of meters.
         """
+        return validate_quantity_units(value=value, field_name=info.field_name, unit_equivalency=(u.m,))
+
+    @field_validator('mirror_temperature', 'instrument_temperature', 'detector_temperature')
+    def _validate_thermal_temperature(cls, value: Any, info: ValidationInfo) -> float:
+        """Validate a thermal background temperature input (mirror/instrument/detector).
+
+        Parameters
+        ----------
+        value : Any
+            The value given as input.
+        info : ValidationInfo
+            The validation information object.
+
+        Returns
+        -------
+        float
+            The temperature in units of Kelvin, or None if not given.
+        """
+        if value is None:
+            return None
+        return validate_quantity_units(value=value, field_name=info.field_name, unit_equivalency=(u.K,))
+
+    @field_validator('detector_wavelength_min', 'detector_wavelength_max', 'pixel_size')
+    def _validate_thermal_length(cls, value: Any, info: ValidationInfo) -> float:
+        """Validate a thermal background length input (detector wavelength range, pixel size).
+
+        Parameters
+        ----------
+        value : Any
+            The value given as input.
+        info : ValidationInfo
+            The validation information object.
+
+        Returns
+        -------
+        float
+            The value in units of meters, or None if not given.
+        """
+        if value is None:
+            return None
         return validate_quantity_units(value=value, field_name=info.field_name, unit_equivalency=(u.m,))
 
     @property
@@ -497,6 +563,34 @@ class Instrument(BaseEntity):
             torch.asarray(wavelength_bin_centers, dtype=torch.float32, device=self._phringe._device),
             torch.asarray(wavelength_bin_widths, dtype=torch.float32, device=self._phringe._device)
         )
+
+    def _count_wavelength_bins(self, resolving_power: float) -> int:
+        """Return how many wavelength bins would cover [wavelength_min, wavelength_max] at the
+        given resolving power, using the same binning algorithm as _get_wavelength_bins -- used
+        to compare the simulator's own (possibly reduced, for speed) resolving power against the
+        real instrument's, for the dark current resolution correction.
+
+        Parameters
+        ----------
+        resolving_power : float
+            The spectral resolving power to count bins at.
+
+        Returns
+        -------
+        int
+            The number of wavelength bins.
+        """
+        current_min_wavelength = self.wavelength_min
+        count = 0
+        while current_min_wavelength < self.wavelength_max:
+            center_wavelength = current_min_wavelength / (1 - 1 / (2 * resolving_power))
+            bin_width = 2 * (center_wavelength - current_min_wavelength)
+            if center_wavelength + bin_width / 2 <= self.wavelength_max:
+                count += 1
+                current_min_wavelength = center_wavelength + bin_width / 2
+            else:
+                break
+        return count
 
     def get_response(
             self,
