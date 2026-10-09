@@ -1,5 +1,6 @@
 from phringe.core.base_entity import BaseEntity
 from phringe.core.sources.base_source import BaseSource
+from phringe.core.sources.debris_disk import DebrisDisk
 from phringe.core.sources.exozodi import Exozodi
 from phringe.core.sources.local_zodi import LocalZodi
 from phringe.core.sources.planet import Planet
@@ -19,11 +20,14 @@ class Scene(BaseEntity):
         The exozodiacal dust in the scene
     local_zodi : LocalZodi
         The local zodiacal dust in the scene
+    disks : list[DebrisDisk]
+        Dust rings, belts and disks in the scene
     """
     star: Star = None
     planets: list[Planet] = []
     exozodi: Exozodi = None
     local_zodi: LocalZodi = None
+    disks: list[DebrisDisk] = []
 
     def __setattr__(self, key, value):
         super().__setattr__(key, value)
@@ -48,6 +52,8 @@ class Scene(BaseEntity):
             self.exozodi = source
         elif isinstance(source, LocalZodi):
             self.local_zodi = source
+        elif isinstance(source, DebrisDisk):
+            self.disks.append(source)
 
     def remove_source(self, name: str):
         """Remove a source from the scene.
@@ -66,6 +72,8 @@ class Scene(BaseEntity):
             self.exozodi = None
         elif isinstance(source, LocalZodi):
             self.local_zodi = None
+        elif isinstance(source, DebrisDisk):
+            self.disks.remove(source)
 
     def _get_all_sources(self) -> list[BaseSource]:
         """Return all all_sources in the scene.
@@ -84,6 +92,8 @@ class Scene(BaseEntity):
             all_sources.append(self.local_zodi)
         if self.exozodi is not None:
             all_sources.append(self.exozodi)
+        if self.disks:
+            all_sources.extend(self.disks)
         return all_sources
 
     def _get_source(self, name: str) -> BaseSource:
