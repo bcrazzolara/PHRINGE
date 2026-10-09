@@ -100,6 +100,12 @@ class Instrument(BaseEntity):
     # None, no correction is applied (the simulator's own resolving power is assumed to already
     # match the real instrument's).
     spectral_resolving_power_instrument: float = None
+    # Static on-axis null depth N = I_null(0) / I_bright(0) (e.g. 1e-5). Implemented as a reduced fringe
+    # visibility V = (1 - N) / (1 + N): each output becomes V * (coherent response) + (1 - V) * (incoherent
+    # sum of the input intensities). For a Bracewell pair this gives exactly N on axis; it fills in the
+    # nulls and reduces the fringe contrast everywhere. Achromatic and time-independent. None or 0 means a
+    # perfect null (unchanged behavior).
+    null_depth: Union[float, None] = None
 
     def __init__(self, **data: object) -> None:
         super().__init__(**data)
@@ -295,6 +301,29 @@ class Instrument(BaseEntity):
             return None
         return validate_quantity_units(value=value, field_name=info.field_name, unit_equivalency=(u.m,))
 
+    @field_validator('null_depth')
+    def _validate_null_depth(cls, value: Any, info: ValidationInfo) -> float:
+        """Validate the null depth input.
+
+        Parameters
+        ----------
+        value : Any
+            The value given as input.
+        info : ValidationInfo
+            The validation information object.
+
+        Returns
+        -------
+        float
+            The null depth, or None if not given.
+        """
+        if value is None:
+            return None
+        value = float(value)
+        if not 0 <= value < 1:
+            raise ValueError(f"null_depth must be in [0, 1), got {value}.")
+        return value
+
     @property
     def _field_of_view(self):
         """Return the field of view for each wavelength bin.
@@ -488,6 +517,7 @@ class Instrument(BaseEntity):
             phase = 2 * pi / self._sym_wavelength * (
                     self._sym_acm[0, k] * self._sym_alpha_coord + self._sym_acm[1, k] * self._sym_beta_coord) + \
                     self._sym_phase_pert[k]
+            # sqrt(pi) so that |E_k|^2 = pi * A_k^2 = effective collecting area (A_k = D/2 * sqrt(throughput * QE))
             common = self._sym_ampl[k] * sqrt(pi) * (self._sym_ampl_pert[k] + 1) * exp(I * phase)
             complex_ampl_x[k] = common * cos(
                 self._sym_pol_pert[k])  # cos(th[k] + pol_pert[k]) assuming th = 0 for all k
@@ -500,6 +530,11 @@ class Instrument(BaseEntity):
         self._fov_taper = fov_taper
         # fov_taper = 1
 
+        # Fringe visibility corresponding to the requested on-axis null depth, inverting N = (1 - V) / (1 + V)
+        # (V = 1 for a perfect null)
+        null_depth = self.null_depth or 0
+        visibility = (1 - null_depth) / (1 + null_depth)
+
         # Calculate intensity response
         response_total = {}
         response_x = {}
@@ -508,10 +543,27 @@ class Instrument(BaseEntity):
         for j in range(self.number_of_outputs):
             response_x[j] = 0
             response_y[j] = 0
+            response_incoherent = 0
             for k in range(self.number_of_inputs):
+                # Coherent contribution: add the complex fields of all inputs (per polarization), square after addition
                 response_x[j] += self._sym_catm[j, k] * complex_ampl_x[k]
                 response_y[j] += self._sym_catm[j, k] * complex_ampl_y[k]
-            response_total[j] = (Abs(response_x[j]) ** 2 + Abs(response_y[j]) ** 2) * fov_taper
+
+                # Incoherent contribution: add the power of each input, 
+                # |U_jk|^2 * (|E_k,x|^2 + |E_k,y|^2) = |U_jk|^2 * pi * (A_k * [1 + δA_k])^2
+                response_incoherent += Abs(self._sym_catm[j, k]) ** 2 * pi * (
+                        self._sym_ampl[k] * (self._sym_ampl_pert[k] + 1)) ** 2
+
+            # Power of the coherent contribution: fields were summed over the inputs above, now squared. x and y
+            # are squared separately since orthogonal polarizations do not interfere
+            response_coherent = Abs(response_x[j]) ** 2 + Abs(response_y[j]) ** 2
+
+            # Only a fraction V of the light interferes, the rest adds incoherently
+            if visibility == 1:
+                response_total[j] = response_coherent * fov_taper
+            else:
+                response_total[j] = (visibility * response_coherent
+                                     + (1 - visibility) * response_incoherent) * fov_taper
 
         self._response_symbolic = response_total
 
